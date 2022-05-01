@@ -1,0 +1,903 @@
+---
+title: "Supplemental Methods: LPS-Induced Cardiomyopathy"
+author: "Mark E. Pepin, MD, PhD"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    keep_md: yes
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{multirow}
+- \usepackage[table]{xcolor}
+- \usepackage{wrapfig}
+- \usepackage{float}
+- \usepackage{colortbl}
+- \usepackage{pdflscape}
+- \usepackage{tabu}
+- \usepackage{threeparttable}
+mainfont: Times
+fontsize: 10pt
+always_allow_html: yes
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup_markdown, include=FALSE}
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=30),tidy=FALSE, warning = FALSE, message = FALSE, cache.lazy = FALSE)
+options(knitr.kable.NA = '')
+```
+
+**Code Author**: Mark E. Pepin MD, PhD
+
+**Corresponding Author**: Maarten Van Den Hoogenhoff, PhD
+
+**Contact**: [pepinme\@gmail.com](mailto:pepinme@gmail.com){.email}
+
+**Institution**: Heidelberg University Hospital
+
+**Location**: 669 Neuenheimer Feld, Institute for Experimental
+Cardiology, 69120 Heidelberg, Germany
+
+# Preliminary Setup
+
+## Packages
+
+```{r packages}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, Hmisc, openxlsx, corrplot, RColorBrewer, kableExtra, ggplot2, gridExtra, ggpubr, ggsignif, DESeq2, data.table, GenomicFeatures, biomaRt, Haplin, pheatmap, calibrate, ggrepel, tidyr, gtools, rlist, limma, wesanderson,plotly)
+```
+
+## Parameters
+
+Define the parameters used, along with the conditions required for the
+current analysis. This segment must be modified for each analysis
+performed.
+
+```{r Parameters}
+start_t<-Sys.time()
+##Set the experimental conditions [MUST DO THIS MANUALLY]
+INVEST=c("Maarten")
+GENOTYPE=c("WT","RBM20.KO") 
+GROUP=c("F_WT", "F_RBM20.KO")
+SEX=c("F")
+# OUTLIER=c("676")
+STATISTIC = 0.05 #P statistic threshold used in this combination.
+# Set the "variable" that determines differential expression
+VARIABLE = GROUP
+COMPARISON= paste0(SEX[1],"_", GENOTYPE[2], ".v.", GENOTYPE[1])
+colData_all <- openxlsx::read.xlsx("../1_Input/colData.xlsx")
+colData_all$Group<-factor(colData_all$Group, levels = c("M_WT", "F_WT", "M_RBM20.KO", "F_RBM20.KO"))
+#Colors
+# Candidate Gene Selection (RNA-sequencing) EDIT THIS LIST BASED ON INTERESTS.
+GENES=c("Rbm20", "Camk2d", "Camk2g", "Ttn")
+my_comparisons_all <- list(c("F_WT", "M_WT"), c("M_WT", "M_RBM20.KO"), c("F_WT", "F_RBM20.KO"), c("F_RBM20.KO", "M_RBM20.KO"))
+my_comparisons_female <- list(c("F_WT", "F_RBM20.KO"))
+my_comparisons_male <- list(c("M_WT", "M_RBM20.KO"))
+## Create color based on Genotype
+ann_colors = list(Group = c(F_WT="grey", M_WT = "darkcyan", F_RBM20.KO ="coral2", M_RBM20.KO = "dodgerblue2"))
+ann_colorTable<-as.data.frame(ann_colors)
+ann_colGroup<-subset(ann_colorTable, rownames(ann_colorTable) %in% GROUP) #Creates colors just for the specific comparison (by GROUP)
+ann_colListGroup<-list(ann_colGroup)
+ann_colGroupVec<-ann_colGroup$Group
+ann_colorInvest<-subset(ann_colorTable, rownames(ann_colorTable) %in% colData_all$Group) #Creates colors just for the specific comparison (by INVEST)
+ann_colListInvest<-list(ann_colorInvest$Group)
+ann_colorInvestVec<-ann_colorInvest$Group
+names(ann_colorInvestVec)<-as.factor(rownames(ann_colorInvest))
+INVEST_colors<-list(ann_colorInvestVec=ann_colorInvestVec)
+names(ann_colGroupVec)<-as.factor(rownames(ann_colGroup))
+GROUP_colors<-list(ann_colGroupVec=ann_colGroupVec)
+
+# Create Output Folder Structure
+ifelse(!dir.exists(file.path(paste0("../2_Output/"))), dir.create(file.path(paste0("../2_Output/"))), FALSE)
+```
+
+# RNA-Sequencing Analysis
+
+## RNA-Sequencing Alignment using STAR (v2.7.10a)
+
+RNA was isolated from the left ventricle endocardial tissue using the
+RNeasy Lipid Mini-Kit according to the manufacturer's instructions
+(Qiagen, Valencia, CA). High-throughput RNA sequencing was performed at
+BGI (Hong Kong, CN). Once sample read quality was checked (FastQC ->
+multiQC analysis), the paired-end fastq files were then aligned to the
+reference genome, which was created using Gencode mouse sequence
+(GRCm38.primary_assembly.genome.fa) and annotation
+(gencode.vM25.primary_assembly.annotation.gtf). STAR aligner
+(2.7.10a) is the current gold-standard for this, which we
+used for the current analysis. Before aligning each fastq file to the
+genome, an annotated reference genome must first be assembled. This was
+performed as follows (this was performed in Cheaha as \`bash
+GenomeReference.sh':
+
+rclone Philip_RNASeq/ gdrive:fasrc/Subfolder --progress
+
+`STAR=../../Tools/STAR-2.7.10a/bin/Linux_x86_64/STAR`
+`$STAR \`
+`--runThreadN 8 \`
+`--runMode genomeGenerate \`
+`--genomeDir ./ \`
+`--genomeFastaFiles [path-to-"GRCm38.primary_assembly.genome.fa"] \`
+`--sjdbOverhang 100 \`
+`--sjdbGTFfile ${GTF} \`
+
+Alignment of short reads to this annotated genome could then proceed,
+using the following SLURM batch script which was submitted to the UAB
+*Cheaha* compute cluster (See **Attached Shell script**). This shell
+script contains the following STAR alignment run settings:
+
+`$STAR_RUN \`
+`--genomeDir $GENOME_DIR \`
+`--readFilesCommand zcat \`
+`--readFilesIn $INPUT_DIR/fastq/${VAR}_1.fastq.gz $INPUT_DIR/fastq/${VAR}_2.fastq.gz \`
+`--sjdbGTFfile $GENOME_DIR/gencode.vM25.chr_patch_hapl_scaff.annotation.gtf  \`
+`--quantMode GeneCounts \`
+`--runThreadN 12 \`
+`--outSAMtype BAM SortedByCoordinate \`
+`--outFileNamePrefix ${RESULTS_DIR}/Alignment/${VAR}_`
+
+## Read Count Compiling
+
+Before the DESeq2-based differential expression can be computed, the
+counts generated by STAR need to be compiled, since the .tab file
+contains count information based on forward, reverse, and combined
+reads. Therefore, we will take the fourth column in each table and merge
+them.
+
+```{r Count.Compile}
+Count.files <- list.files(path = "../1_Input/Counts/", pattern = "*_ReadsPerGene.out.tab", full.names = TRUE, all.files = TRUE)
+Counts <- lapply(Count.files, read.table, skip = 4) #skip the first 4 rows, since these are summary data.
+#Create a data.frame containing the raw counts
+countData.raw <- as.data.frame(sapply(Counts, function(x) x[,2])) #selects only the 4th column raw counts.
+#Generate Column names and Row names for the counts (remove the extra nonsense from the path names)
+colnames <- gsub( "_ReadsPerGene[.]out[.]tab", "", Count.files)
+colnames <- gsub( ".*-", "", colnames) # removes everything before the hyphen
+colnames(countData.raw) <- colnames
+row.names(countData.raw) <- Counts[[1]][,1]
+```
+
+## Data Pre-Processing
+
+After alignment of the fastq files to the annotated genome assembly
+(mm10), the first step in the analysis is to consolidate the raw data
+from the provided files into data matrix that can be used to generate a
+normalized count matrix and differential expression dataset.
+
+```{r tidy.data, echo=FALSE}
+library(DESeq2)
+library(data.table)
+library(biomaRt)
+library(dplyr)
+library(openxlsx)
+library(Haplin)
+library(pheatmap)
+library(calibrate)
+#########Part 1: Importing the Data
+##Set the experimental conditions
+ifelse(!dir.exists(file.path(paste0("../2_Output/", COMPARISON))), dir.create(file.path(paste0("../2_Output/", COMPARISON))), FALSE)
+# Create the countData (Input to DESeq2)
+library(openxlsx)
+
+#Parameters
+colData_all$Genotype<-factor(colData_all$Genotype, levels = c("WT", "RBM20.KO")) #the order here MATTERS! Always specify your reference FIRST; this determines the fold-change direction.
+
+#Select the patient characteristics needed for the current comparison.
+colData<-dplyr::filter(colData_all, Group %in% GROUP)
+rownames(colData)<-colData$Sample_ID
+#colData<-filter(colData)
+vector<-rownames(colData)
+
+##Import Counts Data
+countData<-dplyr::select(countData.raw, all_of(vector))
+
+#Save a copy of the countData
+library(openxlsx)
+wb_countData<-createWorkbook()
+addWorksheet(wb_countData, "CountData.Raw")
+  writeData(wb_countData, "CountData.Raw", cbind(rownames(countData.raw),countData.raw), startCol = 1)
+addWorksheet(wb_countData, "CountData")
+  writeData(wb_countData, "CountData", cbind(rownames(countData),countData), startCol = 1)
+addWorksheet(wb_countData, "colData")
+  writeData(wb_countData, "colData", colData, startCol = 1)
+saveWorkbook(wb_countData, file = paste0("../1_Input/", COMPARISON, "_input.xlsx"), overwrite = TRUE)
+```
+
+### Count Normalization
+
+DESeq2 (version 1.34.0) was used to perform the raw count normalization
+within R (version 4.1.2) and pairwise differential expression according
+to genotype.
+
+```{r DESeq2}
+######### RUN DESeq2
+dds<-DESeqDataSetFromMatrix(countData=countData, colData = colData, design= ~Group)
+dds
+#Determine the Dispersion Relationship (determines which distribution to use for the differential analysis) - should take about 2 minutes
+dds <- estimateSizeFactors(dds)
+dds <- estimateDispersions(dds)
+plotDispEsts(dds)
+png(file=paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_Dispersion.png"))
+plotDispEsts(dds)
+dev.off()
+```
+
+There appears to be a linear negative correlation between the mean and
+dispersion estimates, so the parametric "Wald" model should be an
+appropriate fit for differential expression analysis. Furthermore, we get away with the parametric fit-type owing to the apparent
+negative binomial distribution. NOTE: If it were nonlinear throughout,
+we would require a 'local' nonparametric fit-type.
+
+### Differential Expression Analysis
+
+```{r Diff-Exp}
+##Pre-Filter to reduce the size of this dataset (according to the DESeq2 document reccomendations)
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+dds
+################Run DESeq2 differential quantification (Likelihood ratio test (LRT) or Wald-test)
+dds<-DESeq(dds, test="Wald", fitType="parametric")
+#compile the results tables
+resultsNames(dds)
+resdf<-as.data.frame(results(dds,format = "DataFrame"))
+resdf$ensembl_gene_id<-as.character(row.names(resdf))
+```
+
+Once the differential Expression analysis was performed, the following
+were compiled into a results data matrix: Log2FoldChange, P-value,
+Bonferroni-Adjusted P-Value (Q-value), and normalized counts for each
+sample.
+
+```{r Results}
+####Add Annotation to the results file (this will take some time, about 5 minutes...)
+gtf.file="../1_Input/Genome/gencode.vM28.primary_assembly.annotation.gtf"
+gtf.gr = rtracklayer::import(gtf.file) # creates a GRanges object
+gtf.df = as.data.frame(gtf.gr)
+genes = unique(gtf.df[ ,c("gene_id","gene_name")])
+Test1<-gtf.df %>% filter(type=="gene") %>% dplyr::select(ensembl_gene_id=gene_id, gene_name, seqnames:strand)
+# genes = unique(Test1[ ,c("ensembl_gene_id","gene_name")])
+results<-merge(resdf, Test1, by="ensembl_gene_id")
+Residual<-dplyr::anti_join(resdf, results, by = "ensembl_gene_id")
+
+####Add normalized count data (for heatmap and sota)
+normcount<-as.data.frame(counts(dds, normalized=TRUE))
+normcount$ensembl_gene_id<-rownames(normcount)
+results<-dplyr::left_join(results, normcount, by="ensembl_gene_id")
+results<-results[order(results$pvalue),] # order table by pvalue
+##Create a Counts table with annotated Gene name
+Counts_table<-results[,9:ncol(results)]
+Counts_table<-cbind(results$gene_name, Counts_table)
+rownames(Counts_table)<-results$ensembl_gene_id
+write.xlsx(Counts_table, paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_Normalized.Counts.xlsx"), rowNames = FALSE, overwrite = T)
+
+#Create Rlog transformed data
+rld<-rlog(dds)
+rld<-assay(rld) #transpose the rlog-normalized count data
+rld<-as.data.frame(rld) #convert to a data frame (to merge the colData)
+write.xlsx(rld, paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_rlog.counts.xlsx"), rowNames = TRUE, overwrite = T)
+
+#Create filters as tabs
+results_p05<-dplyr::filter(results, pvalue<STATISTIC) 
+results_q05<-dplyr::filter(results, padj<STATISTIC)
+library(openxlsx)
+wb_DESeq<-createWorkbook()
+#Unfiltered
+  addWorksheet(wb_DESeq, "Unfiltered")
+  writeData(wb_DESeq, "Unfiltered", results, startCol = 1)
+#P-value Significant (0.05)
+  addWorksheet(wb_DESeq, "P_0.05")
+  writeData(wb_DESeq, "P_0.05", results_p05, startCol = 1)
+#Q-value Significant (0.05)
+  addWorksheet(wb_DESeq, "Q_0.05")
+  writeData(wb_DESeq, "Q_0.05", results_q05, startCol = 1)
+saveWorkbook(wb_DESeq, file = paste0("../2_Output/", COMPARISON, "/", COMPARISON,"_DESeq2.xlsx"), overwrite = TRUE)
+```
+
+### MDS Plot - Transcriptomics
+
+Unsupervised MDS demonstrates a sex difference, yet a weak separation between genotypes (**Supplemental Figure S5**).
+
+```{r MDS}
+library(limma)
+library(openxlsx)
+# Perform MDS on RNA-sequencing data
+MDS_data<-read.xlsx(paste0("../1_Input/rlog.counts.xlsx"), rowNames = FALSE)
+Index_MDS<-read.xlsx("../1_Input/colData.xlsx")
+rownames(Index_MDS)<-Index_MDS$Sample_ID
+Index_MDS$Sample_ID<-as.character(Index_MDS$Sample_ID)
+options(ggrepel.max.overlaps = Inf)
+#Filter normalized counts to remove outliers
+vector<-Index_MDS$Sample_ID
+MDS_data<-dplyr::select(MDS_data, all_of(vector), -`results$gene_name`)
+# MDS in ggplot2
+Ntop = 10000
+library(magrittr)
+library(dplyr)
+library(ggpubr)
+library(matrixStats)
+library("ggrepel")
+library(wesanderson)
+MDS.set<-as.data.frame(MDS_data)
+RowVar<-rowVars(data.matrix(MDS.set)) #calculate variances for each row (vector)
+MDS.set<-as.data.frame(cbind(MDS.set, RowVar)) #Add to the MDS.set dataset
+MDS_matrix<-MDS.set %>% arrange(desc(RowVar)) %>% top_n(Ntop,RowVar) #Select top N rows by variance
+# Compute MDS
+mds <- MDS_matrix %>% dplyr::select(-RowVar) %>% t(.) %>%
+  dist() %>%          
+  cmdscale() %>%
+  as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+rownames(mds)<-rownames(Index_MDS)
+mds$Sample_ID<-rownames(mds)
+mds<-dplyr::inner_join(mds, Index_MDS)
+#K-means clustering
+clust <- kmeans(mds[,1:2], 2)$cluster %>%
+  as.factor()
+mds <- mds %>%
+  mutate(kmeans.2 = clust)
+###
+library(ggpubr)
+library(cowplot) 
+# Main plot
+pmain <- ggplot(mds, aes(x = Dim.1, y = Dim.2, color = Group))+
+  # scale_color_manual(values = ann_colorInvestVec) +
+  theme(panel.background = element_rect("white", colour = "black", size=2), 
+      panel.grid.major = element_line(colour = "gray50", size=.75), 
+      panel.grid.minor = element_line(colour = "gray50", size=0.4),
+      legend.position="bottom",
+      legend.key=element_blank(),
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face="bold")) +
+  geom_hline(yintercept = 0, size = 1) + 
+  geom_vline(xintercept=0, size=1) +
+  geom_point()+ #Add points for each sample
+  # stat_ellipse()+ # create elliptical shapes
+  geom_text_repel(data=mds, aes(label=Sample_ID), show.legend  = F) + #label the samples
+  labs(x="Principal Component 1", 
+       y="Principal Component 2")
+# Marginal densities along x axis
+xdens <- axis_canvas(pmain, axis = "x")+
+  geom_density(data = mds, aes(x = Dim.1, fill = Group),
+              alpha = 0.7, size = 0.2)
+  # scale_fill_manual(values = ann_colorInvestVec)
+# Marginal densities along y axis
+ydens <- axis_canvas(pmain, axis = "y", coord_flip = TRUE)+ #must set coord_flip = true if using coord_flip() below
+  geom_density(data = mds, aes(x = Dim.2, fill = Group),
+                alpha = 0.7, size = 0.2)+
+  coord_flip()
+  # scale_fill_manual(values = ann_colorInvestVec)
+p1 <- insert_xaxis_grob(pmain, xdens, grid::unit(.2, "null"), position = "top")
+p2<- insert_yaxis_grob(p1, ydens, grid::unit(.2, "null"), position = "right")
+pdf(file=paste0("../2_Output/MDS.Scatterhist.pdf"), height = 5, width = 5, onefile = F)
+ggdraw(p2)
+dev.off()
+ggdraw(p2)
+```
+
+### QQ Plot
+
+Before we examined the gene networks and pathways differentially
+regulated between male and female mice according to genotype, the first task was to determine whether
+transgene induction resulted in global changes. An effective way of
+determining this is the QQ plot, which compares the P-value distribution
+produced by the pairwise comparison to that of a random normal
+distribution. Below, it is evident that differential expression
+according to patient race yields a robustly divergent expression pattern, one
+that likely reflects population differences in gene activation.
+
+```{r QQ-Plot}
+#Create Q-Q plot
+test<-results
+test<-test[complete.cases(test),]
+pQQ(test$pvalue, lim=c(0,10))
+png(file=paste0("../2_Output/", COMPARISON,  "/", COMPARISON,"_QQ.Plot.png"))
+pQQ(test$pvalue, lim=c(0,10))
+dev.off()
+```
+
+## Principal Components Analysis
+
+Once we established that the populations under consideration truly
+display disparate expression patterns, we determine whether
+unbiased global gene expression patterns recapitulate the described
+phenotypes within each phenotype/genotype. To accomplish this, an
+unsupervised Principal Components Analysis (PCA) was initially used with
+normalized counts.
+
+### PCA Features
+
+Before running the principal components analysis, it was necessary to
+first determine the number of PC's required to account for 80% of the
+variance, a machine-learning algorithmm benchmark that provides
+sufficient confidence in the analysis.
+
+```{r PCA_Features}
+#Plot Features of the PCA
+library(dplyr)
+library(plotly)
+##Import the data to be used for PCA
+PCA_data<-read.xlsx("../1_Input/rlog.counts.xlsx", rowNames = TRUE)
+Index_PCA<-read.xlsx("../1_Input/colData.xlsx")
+rownames(Index_PCA)<-Index_PCA$Sample_ID
+#transpose the dataset (required for PCA)
+data.pca<-t(PCA_data)
+data.pca<-as.data.frame(data.pca)
+##merge the file
+data.pca_Final<-merge(Index_PCA, data.pca, by=0)
+rownames(data.pca_Final)<-data.pca_Final$Row.names
+pca.comp<-prcomp(data.pca_Final[,(ncol(Index_PCA)+2):ncol(data.pca_Final)])
+
+pcaCharts=function(x) {
+    x.var <- x$sdev ^ 2
+    x.pvar <- x.var/sum(x.var)
+    par(mfrow=c(2,2))
+    plot(x.pvar,xlab="Principal component",
+         ylab="Proportion of variance", ylim=c(0,1), type='b')
+    plot(cumsum(x.pvar),xlab="Principal component",
+         ylab="Cumulative Proportion of variance",
+         ylim=c(0,1),
+         type='b')
+    screeplot(x)
+    screeplot(x,type="l")
+    par(mfrow=c(1,1))
+}
+pcaCharts(pca.comp)
+
+png(file=paste0("../2_Output/", COMPARISON,  "/", COMPARISON, "_PCA.Charts.png"))
+pcaCharts(pca.comp)
+dev.off()
+```
+
+### 3-Dimensional PCA
+
+From the previous calculations, it is seens that 3 principal
+components are necessary, so below is a 3-D PCA to ensure that all groups are
+characterize to higher-degree of stringency.
+
+```{r PCA-Summary}
+##Create a 3D-PCA for Inspection
+library(plotly)
+##Index
+PCA_data<-read.xlsx(paste0("../1_Input/rlog.counts.xlsx"), rowNames = TRUE)
+Index_PCA<-read.xlsx("../1_Input/colData.xlsx")
+rownames(Index_PCA)<-Index_PCA$Sample_ID
+Index_PCA$Group<-factor(Index_PCA$Group)
+rownames(Index_PCA)<-Index_PCA$Sample_ID
+PCs<-merge(pca.comp$x, Index_PCA, by=0)
+rownames(PCs)<-PCs$Row.names
+PCs$Group <- as.factor(PCs$Group)
+fig <- plot_ly(PCs, x = ~PC1, y = ~PC2, z = ~PC3, color = ~Group, text = ~paste('Sample_ID:', Sample_ID, '<br>Genotype:', Genotype, '<br>Sex:', Sex))
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'PC1'),
+                     yaxis = list(title = 'PC2'),
+                     zaxis = list(title = 'PC3')))
+fig
+```
+
+## Volcano Plot
+
+To understand the most significant alterations in gene expression, we plotted data according to statistical (-Log10(Pvalue)) and biological (log2(fold-change)) robustness.
+
+```{r volcano plot}
+# Load packages
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(openxlsx)
+#DKO Effect in VEH
+results = mutate(results, sig_dko.veh=ifelse(results$padj<STATISTIC & abs(results$log2FoldChange)>0.585, paste0("FDR < 0.05 & |FC| > 1.5"), "Not Sig"), minuslogqvalue = -log(padj), log2FC=log2FoldChange) %>% filter(minuslogqvalue!="Inf")
+results$sig_dko.veh<-factor(results$sig_dko.veh, levels = c("Not Sig","FDR < 0.05 & |FC| > 1.5"))
+max(results$minuslogqvalue, na.rm = TRUE)
+min(results$minuslogqvalue, na.rm = TRUE)
+max(results$log2FC, na.rm = TRUE)
+min(results$log2FC, na.rm = TRUE)
+#plot the ggplot
+p = ggplot(results, aes(log2FC, minuslogqvalue)) + theme(panel.background = element_rect("white", colour = "black", size=2), panel.grid.major = element_line(colour = "gray50", size=.75), panel.grid.minor = element_line(colour = "gray50", size=0.4)) + 
+geom_point(aes(fill=sig_dko.veh, size = minuslogqvalue), colour="grey", shape=21, stroke = 0, alpha = 8/10) + labs(x=expression(Log[2](Fold-Change)), y=expression(-Log[10](FDR))) + xlim(min(results$log2FC, na.rm = TRUE),max(results$log2FC, na.rm = TRUE))+ ylim(-0, max(results$minuslogqvalue, na.rm = TRUE)) +   geom_hline(yintercept = 0, size = 1) + geom_vline(xintercept=0, size=1)+ 
+  scale_fill_manual(values=c("grey", "tomato")) +
+  scale_size_continuous(range = c(.25, 4))
+#add a repelling effect to the text labels.
+p+
+  geom_text_repel(data=top_n(filter(results, log2FC>0), 10, -padj), aes(label=gene_name)) +
+  geom_text_repel(data=top_n(filter(results, log2FC<0), 10, -padj), aes(label=gene_name))
+
+#Print the image
+png(file = paste0("../2_Output/", COMPARISON, "/", COMPARISON, "_Volcano.Plot.png"), width = 7.5, height = 5, res = 300, units = "in")
+p+
+  geom_text_repel(data=top_n(filter(results, log2FC>0), 10, -pvalue), aes(label=gene_name)) +
+  geom_text_repel(data=top_n(filter(results, log2FC<0), 10, -pvalue), aes(label=gene_name))
+dev.off()
+```
+
+## Heatmap and Clustering of DEGs
+
+To visualize the distribution of DEGs, as well as determine the effect of biological sex
+on transcription, hierarchical clustering and heatmap visualization were
+performed at the P \< 0.05 statistical level. This analysis reveals that
+P \< 0.05 is sufficient to delineate hierarchical clustering according to genotype, and also higlights sex differences within each.
+
+```{r heatmap}
+library(dplyr)
+library(pheatmap)
+library(ComplexHeatmap)
+##
+##Index file for annotating samples
+rownames(colData_all)<-colData_all$Sample_ID
+Index<-subset(colData_all) %>% select(Genotype, Sex) %>% select_if(~ !any(is.na(.)))
+Index<-as.data.frame(Index)
+# Format heatmap counts Data
+results_p05<-filter(results, pvalue<STATISTIC)
+rownames(results_p05)<-make.unique(results_p05$gene_name, sep = ".")
+normCount_all<-read.xlsx(paste0("../1_Input/Normalized.Counts.xlsx"), rowNames = F)
+## Remove outliers
+vector<-rownames(Index)
+normCount_all<-select(normCount_all, `results$gene_name`, any_of(vector))
+## Create heatmap matrix
+hm_data<-subset(normCount_all, `results$gene_name` %in% results_p05$gene_name) 
+rownames(hm_data)<-make.unique(hm_data$`results$gene_name`, sep = ".")
+hm_data<- hm_data %>% select(-`results$gene_name`) %>% data.matrix()
+#Create heatmaps on summary data
+paletteLength <- 100
+myColor <- colorRampPalette(c("dodgerblue4", "white", "gold2"))(paletteLength)
+pheatmap::pheatmap(hm_data, scale="row",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         #breaks = myBreaks,
+        # cutree_cols = 2,
+         cutree_rows = 2,
+         angle_col = 45,
+         fontsize_col = 8,
+         color = myColor,
+         show_rownames = FALSE,
+         border_color = NA,
+         annotation_colors = GROUP_colors,
+         annotation_col = Index,
+         filename=paste0("../2_Output/", COMPARISON,  "/", COMPARISON,"_Heatmap_Normcount_P05.pdf"))
+vst<-varianceStabilizingTransformation(data.matrix(countData.raw))
+normhm<-vst[row.names(resdf[which(resdf$pvalue<STATISTIC),]),]
+normhm<-scale(t(normhm))
+normhm<-t(normhm)
+colData_exp<-subset(colData_all, Sex %in% SEX, Genotype %in% Genotype)
+normhm<-as.data.frame(normhm) %>% select(any_of(rownames(colData_exp)))
+pheatmap::pheatmap(normhm, #Variance stabilized transformation
+         cluster_cols=T,
+         clustering_method = "ward.D2",
+         border_color=NA,
+         cutree_cols = 2,
+         cutree_rows = 4,
+         cluster_rows=T,
+         scale = 'row',
+         show_colnames = F,
+         show_rownames = F,
+         annotation_colors = GROUP_colors,
+         color = myColor,
+         annotation_col = colData_exp,
+         filename=paste0("../2_Output/", COMPARISON,  "/", COMPARISON,"_VST.Heatmap.P05.pdf"))
+
+## Create a heatmap on only the samples used in the comparison
+normhm_group<-dplyr::select(as.data.frame(normhm), any_of(vector)) %>% data.matrix() 
+normhm_group<-t(scale(t(normhm_group)))
+
+heat<-pheatmap::pheatmap(normhm_group, #Variance stabilized transformation
+         cluster_cols=T,
+         clustering_method = "ward.D2",
+         border_color=NA,
+         cluster_rows=T,
+         scale = 'row',
+         show_colnames = T,
+         show_rownames = F,
+         annotation_colors = GROUP_colors,
+         color = myColor,
+         annotation_col = Index)
+```
+
+# Candidate Gene Expression
+
+To examine individual genes, I created a script that can search for genes and plot with statistics (student's t-test). in the *Parameters* section, enter a gene name in the *GENES* vector and a graph will be produced in the "../2_Output/Candidates" folder.
+
+
+```{r DEGs}
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(dplyr)
+library(gtools)
+library(openxlsx)
+ifelse(!dir.exists(file.path(paste0("../2_Output/Candidates"))), dir.create(file.path(paste0("../2_Output/Candidates"))), FALSE)
+#Import Index file
+colData<-openxlsx::read.xlsx("../1_Input/colData.xlsx",  startRow = 1)
+colData$Sample_ID<-as.character(colData$Sample_ID)
+# colData<-colData %>% filter(Sex=="F") # Select sex (if applicable)
+##Import normalized counts
+Counts<-read.xlsx(paste0("../1_Input/Normalized.Counts.xlsx"), rowNames = F)
+#Remove outliers
+vector<-colData$Sample_ID
+Counts<-dplyr::select(Counts, any_of(vector), `results$gene_name`) %>% rename(gene_name=`results$gene_name`)
+
+#Filter results by the gene vector
+DEGs<-subset(Counts, gene_name %in% GENES)
+rownames(DEGs)<-make.unique(as.character(DEGs$gene_name, sep = "."))
+tDEGs<-as.data.frame(t(DEGs))
+## convert all genes to numeric (from factors)
+asNumeric=function(x){as.numeric(as.character(x))}
+factorsNumeric=function(d){modifyList(d, lapply(d[, sapply(d, is.character)], asNumeric))}
+##
+tDEGs<-factorsNumeric(tDEGs)
+tDEGs$Sample_ID<-rownames(tDEGs)
+colData.ex<-dplyr::inner_join(tDEGs, colData)
+colData.ex$Group<-factor(colData.ex$Group, levels = c("F_WT","M_WT","F_RBM20.KO", "M_RBM20.KO"))
+colData.ex<-dplyr::group_by_(colData.ex, "Group") #define groups for statistics
+write.xlsx(colData.ex, paste0("../2_Output/Candidates/Candidate_genes.xlsx"), overwrite = T)
+## For loop creating a graph for each gene
+plotlist = list()
+p<-1
+for (i in GENES){
+g_plot<-ggboxplot(colData.ex, x = "Group", 
+          y = i, 
+          fill = "Group",
+          add = "jitter"
+          ) + 
+  scale_fill_manual(values = ann_colorInvestVec) +
+  stat_compare_means(aes(group = Group),
+                    comparisons = my_comparisons_all,
+                    label = "p.signif",
+                    bracket.nudge.y = 5
+                    ) +
+  theme(axis.text.x=element_text(size=rel(0.75), angle = 45, hjust = 1), axis.text.y=element_text(size=rel(0.75)), axis.title.x = element_blank(), axis.title.y = element_text(face = "bold"), legend.position="none") + # resize labels, remove legend
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) + # expand = expansion(mult = c(0, 0.1)) ### Y scale (to see the statistics)
+  geom_text_repel(aes(label=Sample_ID), color = "grey", size = 2) # Add Sample_ID
+
+g_plot
+
+pdf(file=paste0("../2_Output/Candidates/", i, "_Expression_Male.pdf"), width = 6, height = 6)
+print(g_plot)
+dev.off()
+plotlist[[i]] = g_plot
+}
+t<-marrangeGrob(grobs = plotlist, legend, nrow=2, ncol=2)
+ggsave(paste0("../2_Output/Candidates/DEGs.pdf"), t, width = 6, height = 7)
+t
+```
+
+# Promoter-based Motif Enrichment in HOMER
+
+## Motif Pre-processing
+
+In order to determine the relative enrichment of response elements in
+the proximal promoters of differentially-expressed genes, the first step
+is to define the lists of up-regulated and down-regulated genes.
+Furthermore, because motif-enrichment requires the use of system
+commands (i.e. HOMER), R variables should be exported as system
+variables to preserve the analysis pipeline.
+
+```{r homer.pre}
+homer_tS<-Sys.time()
+library(dplyr)
+GeneList.up<-dplyr::filter(results_p05, log2FoldChange>.454) %>% .$gene_name
+GeneList.down<-dplyr::filter(results_p05, log2FoldChange< -.454) %>% .$gene_name
+#Create the gene list for motif Enrichment (UP)
+fileConn<-file(paste0("../2_Output/", COMPARISON, "/", "DEGS_UP.txt")) 
+writeLines(GeneList.up, fileConn)
+close(fileConn)
+#Create the gene list for motif Enrichment (DOWN)
+fileConn<-file(paste0("../2_Output/", COMPARISON, "/", "DEGS_DOWN.txt")) 
+writeLines(GeneList.down, fileConn)
+close(fileConn)
+```
+
+## Run HOMER from bash terminal
+
+Now HOMER can be run using a bash script within this session. Note that
+proper setup of HOMER is needed to execute this function, including
+designation of `PATH=$PATH:/Users/chucknorris/homer/bin/` within the
+`~/.bash_profile` file; sourcing this file (see below) connects the
+HOMER software with the rmarkdown session.
+
+<!-- ```{bash HOMER, echo=TRUE} -->
+<!-- source $HOME/.bash_profile -->
+<!-- # perl /Users/markpepin/opt/anaconda3/share/homer-4.10-0/.//configureHomer.pl -install mouse-p -->
+<!-- findMotifs.pl $motifLoc_WD/DEGS_DOWN.txt mouse $motifLoc_DOWN -->
+<!-- findMotifs.pl $motifLoc_WD/DEGS_UP.txt mouse $motifLoc_UP -->
+<!-- ``` -->
+
+# Pathway Enrichment
+
+```{r enrichr}
+library(dplyr)
+library(pathview)
+library(biomaRt)
+library(openxlsx)
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger") # Stop the Venn Diagram from making a log file...
+F_RBM.v.WT<-read.xlsx("../2_Output/F_RBM20.KO.v.WT/F_RBM20.KO.v.WT_DESeq2.xlsx", sheet = "Q_0.05")
+M_RBM.v.WT<-read.xlsx("../2_Output/M_RBM20.KO.v.WT/M_RBM20.KO.v.WT_DESeq2.xlsx", sheet = "Q_0.05")
+# Female Only DEGs
+F_RBM.v.WT_UP<-filter(F_RBM.v.WT, log2FoldChange>0.585)
+F_RBM.v.WT_DOWN<-filter(F_RBM.v.WT, log2FoldChange< -0.585)
+F_RBM.v.WT_ONLY<-anti_join(F_RBM.v.WT, M_RBM.v.WT, by = "gene_name")
+F_RBM.v.WT_ONLY.UP<-F_RBM.v.WT_ONLY %>% filter(log2FoldChange>0.585)
+F_RBM.v.WT_ONLY.DOWN<-F_RBM.v.WT_ONLY %>% filter(log2FoldChange< -0.585)
+# Male Only DEGs
+M_RBM.v.WT_UP<-filter(M_RBM.v.WT, log2FoldChange>0.585)
+M_RBM.v.WT_DOWN<-filter(M_RBM.v.WT, log2FoldChange< -0.585)
+M_RBM.v.WT_ONLY<-anti_join(M_RBM.v.WT, F_RBM.v.WT, by = "gene_name")
+M_RBM.v.WT_ONLY.UP<-M_RBM.v.WT_ONLY %>% filter(log2FoldChange>0.585)
+M_RBM.v.WT_ONLY.DOWN<-M_RBM.v.WT_ONLY %>% filter(log2FoldChange< -0.585)
+
+# Overlapping DEGs
+Conserved_DEGs<-inner_join(F_RBM.v.WT, M_RBM.v.WT, by = "ensembl_gene_id") %>% dplyr::rename(GeneName = gene_name.x) %>% rename_all(~stringr::str_replace_all(.,c(".y"="_M_RBM.v.WT", ".x"="_F_RBM.v.WT")))
+rownames(Conserved_DEGs)<-make.unique(Conserved_DEGs$GeneName, sep = ".")
+Conserved_Both.UP<-Conserved_DEGs %>% filter(log2FoldChange_F_RBM.v.WT > 0.585, log2FoldChange_M_RBM.v.WT > 0.585)
+Conserved_Both.DOWN<-Conserved_DEGs %>% filter(log2FoldChange_F_RBM.v.WT < -0.585, log2FoldChange_M_RBM.v.WT < -0.585)
+Conserved_Inverse<-Conserved_DEGs %>% filter((log2FoldChange_F_RBM.v.WT>0.585 & log2FoldChange_M_RBM.v.WT< -0.585) | (log2FoldChange_F_RBM.v.WT< -0.585 & log2FoldChange_M_RBM.v.WT>0.585))
+write.xlsx(Conserved_DEGs, "../2_Output/conserved.DEGs.xlsx", overwrite = TRUE)
+
+library(openxlsx)
+wb_DESeq<-createWorkbook()
+#Unfiltered
+  addWorksheet(wb_DESeq, "F_RBM.v.WT_ONLY")
+  writeData(wb_DESeq, "F_RBM.v.WT_ONLY", F_RBM.v.WT_ONLY, startCol = 1)
+  addWorksheet(wb_DESeq, "M_RBM.v.WT_ONLY")
+  writeData(wb_DESeq, "M_RBM.v.WT_ONLY", M_RBM.v.WT_ONLY, startCol = 1)
+  addWorksheet(wb_DESeq, "Conserved_DEGs")
+  writeData(wb_DESeq, "Conserved_DEGs", Conserved_DEGs, startCol = 1)
+saveWorkbook(wb_DESeq, file = paste0("../2_Output/Sex.Comparison_RBM.v.WT.xlsx"), overwrite = TRUE)
+########### VENN DIAGRAM
+x<-list(M_RBM.v.WT = M_RBM.v.WT$gene_name, F_RBM.v.WT = F_RBM.v.WT$gene_name)
+library(VennDiagram)
+venn.diagram(x,fill = c("red", "grey"), alpha = c(0.75, 0.75), lty = 'blank', filename = "../2_Output/Overlap.pdf", na = "remove")
+##Enrichr
+library(enrichR)
+Test<-listEnrichrDbs()
+dbs <- c("WikiPathway_2021_Human")
+enriched_F_RBM.v.WT<-enrichr(F_RBM.v.WT$gene_name, dbs)
+enrich.F_RBM.v.WT<-enriched_F_RBM.v.WT[[dbs]]
+enriched_F_RBM.v.WT_UP <- enrichr(F_RBM.v.WT_UP$gene_name, dbs)
+enrich.F_RBM.v.WT_UP<-enriched_F_RBM.v.WT_UP[[dbs]]
+enriched_F_RBM.v.WT_DOWN <- enrichr(F_RBM.v.WT_DOWN$gene_name, dbs)
+enrich.F_RBM.v.WT_DOWN<-enriched_F_RBM.v.WT_DOWN[[dbs]]
+# F_RBM.v.WT Only
+enriched_F_RBM.v.WT_ONLY.UP <- enrichr(F_RBM.v.WT_ONLY.UP$gene_name, dbs)
+enrich.F_RBM.v.WT_ONLY.UP<-enriched_F_RBM.v.WT_ONLY.UP[[dbs]]
+enriched_F_RBM.v.WT_ONLY.DOWN <- enrichr(F_RBM.v.WT_ONLY.DOWN$gene_name, dbs)
+enrich.F_RBM.v.WT_ONLY.DOWN<-enriched_F_RBM.v.WT_ONLY.DOWN[[dbs]]
+#M_RBM.v.WT
+enriched_M_RBM.v.WT <- enrichr(M_RBM.v.WT$gene_name, dbs)
+enrich.M_RBM.v.WT<-enriched_M_RBM.v.WT[[dbs]]
+enriched_M_RBM.v.WT_UP <- enrichr(M_RBM.v.WT_UP$gene_name, dbs)
+enrich.M_RBM.v.WT_UP<-enriched_M_RBM.v.WT_UP[[dbs]]
+enriched_M_RBM.v.WT_DOWN <- enrichr(M_RBM.v.WT_DOWN$gene_name, dbs)
+enrich.M_RBM.v.WT_DOWN<-enriched_M_RBM.v.WT_DOWN[[dbs]]
+#M_RBM.v.WT ONLY
+enriched_M_RBM.v.WT_ONLY.UP <- enrichr(M_RBM.v.WT_ONLY.UP$gene_name, dbs)
+enrich.M_RBM.v.WT_ONLY.UP<-enriched_M_RBM.v.WT_ONLY.UP[[dbs]]
+enriched_M_RBM.v.WT_ONLY.DOWN <- enrichr(M_RBM.v.WT_ONLY.DOWN$gene_name, dbs)
+enrich.M_RBM.v.WT_ONLY.DOWN<-enriched_M_RBM.v.WT_ONLY.DOWN[[dbs]]
+#Overlap
+enriched_Conserved_Both.UP <- enrichr(Conserved_Both.UP$GeneName, dbs)
+enrich.Conserved_Both.UP<-enriched_Conserved_Both.UP[[dbs]]
+enriched_Conserved_Both.DOWN <- enrichr(Conserved_Both.DOWN$GeneName, dbs)
+enrich.Conserved_Both.DOWN<-enriched_Conserved_Both.DOWN[[dbs]]
+
+library(openxlsx)
+wb_DESeq<-createWorkbook()
+#Unfiltered
+  addWorksheet(wb_DESeq, "F_RBM.v.WT_UP")
+  writeData(wb_DESeq, "F_RBM.v.WT_UP", enrich.F_RBM.v.WT_UP, startCol = 1)
+  addWorksheet(wb_DESeq, "F_RBM.v.WT_DOWN")
+  writeData(wb_DESeq, "F_RBM.v.WT_DOWN", enrich.F_RBM.v.WT_DOWN, startCol = 1)
+  addWorksheet(wb_DESeq, "F_RBM.v.WT.ONLY_UP")
+  writeData(wb_DESeq, "F_RBM.v.WT.ONLY_UP", enrich.F_RBM.v.WT_ONLY.UP, startCol = 1)
+  addWorksheet(wb_DESeq, "F_RBM.v.WT.ONLY_DOWN")
+  writeData(wb_DESeq, "F_RBM.v.WT.ONLY_DOWN", enrich.F_RBM.v.WT_ONLY.DOWN, startCol = 1)  
+  addWorksheet(wb_DESeq, "M_RBM.v.WT_UP")
+  writeData(wb_DESeq, "M_RBM.v.WT_UP", enrich.M_RBM.v.WT_UP, startCol = 1)
+  addWorksheet(wb_DESeq, "M_RBM.v.WT_DOWN")
+  writeData(wb_DESeq, "M_RBM.v.WT_DOWN", enrich.M_RBM.v.WT_DOWN, startCol = 1)
+  addWorksheet(wb_DESeq, "M_RBM.v.WT.ONLY_UP")
+  writeData(wb_DESeq, "M_RBM.v.WT.ONLY_UP", enrich.M_RBM.v.WT_ONLY.UP, startCol = 1)
+  addWorksheet(wb_DESeq, "M_RBM.v.WT.ONLY_DOWN")
+  writeData(wb_DESeq, "M_RBM.v.WT.ONLY_DOWN", enrich.M_RBM.v.WT_ONLY.DOWN, startCol = 1)  
+saveWorkbook(wb_DESeq, file = paste0("../2_Output/Pathway.Enrichment_Enrichr_", dbs,".xlsx"), overwrite = TRUE)
+
+```
+
+# Differential Exon Usage
+
+<!-- ```{r DEXSeq} -->
+<!-- library(dplyr) -->
+<!-- library(tidyr) -->
+<!-- library("DEXSeq") -->
+<!-- options(MulticoreParam=quote(MulticoreParam(workers=8))) -->
+<!-- mcparams <- BiocParallel::MulticoreParam(8L) #parallelization (10-core) -->
+
+<!-- #Generate the Count Data matrix -->
+<!-- Count.files <- list.files(path = "../1_Input/Counts", pattern = "*_DEX.txt", full.names = TRUE, all.files = TRUE) -->
+<!-- Counts <- lapply(Count.files, read.table) #skip the first 4 rows, since these are summary data. -->
+<!-- #Create a data.frame containing the raw counts -->
+<!-- countData.raw <- as.data.frame(sapply(Counts, function(x) x[,2])) #selects only the 4th column raw counts. -->
+<!-- #Generate Column names and Row names for the counts (remove the extra nonsense from the path names) -->
+<!-- colnames <- gsub( "_DEX[.]txt", "", Count.files) -->
+<!-- colnames <- gsub( ".*-", "", colnames) # removes everything before the hyphen -->
+<!-- colnames(countData.raw) <- colnames -->
+<!-- row.names(countData.raw) <- Counts[[1]][,1] -->
+
+<!-- #Import the Sample Information -->
+<!-- colData_all <- openxlsx::read.xlsx("../1_Input/colData.xlsx") -->
+<!-- colData_all$Genotype<-factor(colData_all$Genotype, levels = c("WT", "RBM20.KO")) -->
+<!-- colData<-dplyr::filter(colData_all, Group %in% GROUP) %>% rename(condition=Group) -->
+<!-- rownames(colData)<-colData$Sample_ID -->
+
+<!-- ##Select samples for counts -->
+<!-- countData<-dplyr::select(countData.raw, all_of(rownames(colData))) -->
+
+<!-- Features<-as.data.frame(rownames(countData)) %>% dplyr::select(Feature=`rownames(countData)`) %>% separate(., Feature, c("groupID", "featureID"), sep = ":") %>% mutate(groupID=gsub("\\+.*","",.$groupID)) -->
+
+<!-- dxd = DEXSeqDataSet( -->
+<!--    countData = countData, -->
+<!--    sampleData=colData, -->
+<!--    design= ~ sample + exon + Genotype:exon, -->
+<!--    featureID = Features$featureID,  -->
+<!--    groupID = Features$groupID) -->
+<!-- registered() -->
+
+<!-- Test<-subset(dxd, colData(dxd)$Genotype %in% GROUP) -->
+
+<!-- dxd = estimateSizeFactors(dxd) -->
+<!-- dxd = estimateDispersions(dxd) -->
+<!-- plotDispEsts(dxd) -->
+<!-- dxd = testForDEU(dxd) -->
+<!-- # dxd = estimateExonFoldChanges(dxd, fitExpToVar="Group") -->
+<!-- dxr1 = DEXSeqResults(dxd) -->
+<!-- table ( dxr1$padj < 0.1 ) # How many exons have padj < 0.1? -->
+
+<!-- plotMA(dxr1, cex=0.8) -->
+<!-- DEXs<-as.data.frame(dxr1) -->
+
+<!-- ####Add Annotation to the results file (this will take some time, about 5 minutes...) -->
+<!-- gtf.file="../1_Input/Genome/gencode.vM28.primary_assembly.annotation.gtf" -->
+<!-- gtf.gr = rtracklayer::import(gtf.file) # creates a GRanges object -->
+<!-- gtf.df = as.data.frame(gtf.gr) -->
+<!-- genes = unique(gtf.df[ ,c("gene_id","gene_name")]) -->
+<!-- Annot<-gtf.df %>% filter(type=="gene") %>% dplyr::select(ensembl_gene_id=gene_id, gene_name, seqnames:strand) -->
+<!-- # genes = unique(Test1[ ,c("ensembl_gene_id","gene_name")]) -->
+<!-- DEXs_Annot<-merge(Annot, DEXs, by.x = "ensembl_gene_id", by.y="groupID") -->
+
+<!-- wh = (dxr1$groupID=="ENSMUSG00000086503.5") -->
+
+<!-- plotDEXSeq(dxr1, "ENSMUSG00000086503.5", fitExpToVar="Genotype", legend=TRUE, na.rm = TRUE, cex.axis=1.2, cex=1.3, lwd=2, plot.window(xlim = c(0, 1), ylim = c(0, 10))) -->
+
+<!-- ``` -->
+
+
+# Supplemental Table: R Session Information
+
+All packages and settings seen below.
+
+```{r settings}
+# unloading system variables after session
+homer_tE<-Sys.time()
+homer_t<-homer_tE - homer_tS
+homer_t
+
+end_t<-Sys.time()
+Total_time<-end_t - start_t
+Total_time
+Sys.unsetenv("motifLoc_UP")
+Sys.unsetenv("motifLoc_DOWN")
+Sys.unsetenv("motifLoc_WD")
+# Write 
+options(kableExtra.latex.load_packages = FALSE)
+library(kableExtra)
+sinfo<-devtools::session_info()
+sinfo$platform
+sinfo$packages %>% kable(
+                         align="c",
+                         longtable=T,
+                         booktabs=T,
+                         caption="Packages and Required Dependencies") %>%
+    kable_styling(latex_options=c("striped", "repeat_header", "condensed"))
+```
